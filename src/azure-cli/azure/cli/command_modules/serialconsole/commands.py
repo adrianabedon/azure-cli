@@ -17,9 +17,8 @@ def load_command_table(self, _):
 
 
     with self.command_group('serialconsole') as g:
-        g.custom_command('create', 'create_serialconsole')
-        # g.command('delete', 'delete')
-        g.custom_command('list', 'list_serialconsole')
+        g.custom_command('connect', 'connect_serialconsole')
+        # g.custom_command('list', 'list_serialconsole')
         # g.show_command('show', 'get')
         # g.generic_update_command('update', setter_name='update', custom_func_name='update_serialconsole')
 
