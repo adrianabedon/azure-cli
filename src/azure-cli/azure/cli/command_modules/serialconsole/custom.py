@@ -13,9 +13,12 @@ import sys
 
 webSocket = None
 terminalInstance = None
+serialConsoleInstance = None
+terminatingApp = False
 
 def quitapp(fromWebsocket = False):
-    global terminalInstance, webSocket
+    global terminalInstance, webSocket, terminatingApp
+    terminatingApp = True
     if terminalInstance:
         terminalInstance.revertTerminal()
         terminalInstance = None
@@ -60,7 +63,7 @@ class Terminal:
         self.winOut = None
         self.winIn = None
         self.unixOriginalMode = None
-        
+
     def configureTerminal(self):
         if sys.platform.startswith('win'):
             import ctypes
@@ -120,28 +123,33 @@ class Terminal:
                     return
                 termios.tcsetattr(fd, termios.TCSADRAIN, self.unixOriginalMode)
 
-def on_open(ws):
-    print("### OPENING ###", end = "\r\n")
+def listenForKeys():
+    global webSocket
     getch = _Getch()
-
-    #listen for user input
-    def listenForKeys():
-        while(True):
-            c = getch()
+    while(True):
+        c = getch()
+        if webSocket:
             if(c == b'\x1d'):
                 c = getch()
-                if(c == b'\x1d'):
-                    ws.send(c)
-                else:
+                if(c != b'\x1d'):
                     quitapp()
+                    return
             try:
-                ws.send(c)
+                webSocket.send(c)
             except:
                 print("\r\n### CONNECTION CLOSED BY HOST ###")
                 quitapp()
-    th = threading.Thread(target=listenForKeys, args=())
-    th.daemon = True
-    th.start()
+                return
+        else:
+            if(c == b'\r'):
+                serialConsoleInstance.connect()
+            elif(c == b'\x1d'):
+                c = getch()
+                quitapp()
+                return
+
+def on_open(ws):
+    print("### OPENING ###", end = "\r\n")
 
 def on_message(ws, message):
     print(message, end='', flush=True)
@@ -151,43 +159,58 @@ def on_error(ws, error):
     pass
 
 def on_close(ws):
-    if terminalInstance:
-        terminalInstance.revertTerminal()
-    print("\r\n### CLOSING ###", end = "\r\n")
-    sys.exit()
+    global webSocket, terminatingApp
+    if not terminatingApp:
+        print("\r\n### Connection Closed: Press Enter to reconnect... ###", end = "\r\n")
+        webSocket = None
+
+class SerialConsole:
+    def __init__(self, cmd, resource_group_name, vm_name):
+        from azure.cli.core.commands.client_factory import get_subscription_id
+        armEndpoint = "https://management.azure.com"
+        RP_PROVIDER = "Microsoft.SerialConsole"
+        subscriptionId=get_subscription_id(cmd.cli_ctx)
+        self.connectionUrl = "%s/subscriptions/%s/resourcegroups/%s/providers/Microsoft.Compute/virtualMachines/%s/providers/%s/serialPorts/0/connect?api-version=2018-05-01" % (armEndpoint, subscriptionId, resource_group_name, vm_name, RP_PROVIDER)
+    
+    def connect(self):
+        def connectThread():
+            from azure.cli.core._profile import Profile
+            global webSocket
+            tokenInfo,_,_ = Profile().get_raw_token()
+            tokenType = tokenInfo[0]
+            accessToken = tokenInfo[1]
+            applicationJsonFormat = "application/json"
+            serialConsoleUxProdUrl = "https://portal.serialconsole.azure.com"
+            headers = {'authorization' : tokenType + " " + accessToken, 'accept' : applicationJsonFormat, 'origin' : serialConsoleUxProdUrl, 'content-type' : applicationJsonFormat, 'content-length' : "0"}
+            result = requests.post(self.connectionUrl, headers = headers)
+            websocketURL = json.loads(result.text)["connectionString"]
+            print(websocketURL, end = "\r\n")
+            webSocket = websocket.WebSocketApp(websocketURL + "?authorization=" + accessToken,
+                                        on_open = on_open,
+                                        on_message = on_message,
+                                        on_error = on_error,
+                                        on_close = on_close)
+
+            webSocket.run_forever()
+        th = threading.Thread(target=connectThread, args=())
+        th.daemon = True
+        th.start()
 
 def connect_serialconsole(cmd, resource_group_name, vm_name):
-    from azure.cli.core.commands.client_factory import get_subscription_id
-    from azure.cli.core._profile import Profile
-    global webSocket, terminalInstance
-
-    armEndpoint = "https://management.azure.com"
-    RP_PROVIDER = "Microsoft.SerialConsole"
-    subscriptionId=get_subscription_id(cmd.cli_ctx)
-    tokenInfo,_,_ = Profile().get_raw_token()
-    tokenType = tokenInfo[0]
-    accessToken = tokenInfo[1]
-    applicationJsonFormat = "application/json"
-    serialConsoleUxProdUrl = "https://portal.serialconsole.azure.com"
-
-    connectionUrl = "%s/subscriptions/%s/resourcegroups/%s/providers/Microsoft.Compute/virtualMachines/%s/providers/%s/serialPorts/0/connect?api-version=2018-05-01" % (armEndpoint, subscriptionId, resource_group_name, vm_name, RP_PROVIDER)
-    headers = {'authorization' : tokenType + " " + accessToken, 'accept' : applicationJsonFormat, 'origin' : serialConsoleUxProdUrl, 'content-type' : applicationJsonFormat, 'content-length' : "0"}
+    global terminalInstance, serialConsoleInstance
 
     terminalInstance = Terminal()
     terminalInstance.configureTerminal()
 
-    result = requests.post(connectionUrl, headers = headers)
-    websocketURL = json.loads(result.text)["connectionString"]
-    print(websocketURL, end = "\r\n")
     
-    webSocket = websocket.WebSocketApp(websocketURL + "?authorization=" + accessToken,
-                                on_open = on_open,
-                                on_message = on_message,
-                                on_error = on_error,
-                                on_close = on_close)
+    th = threading.Thread(target=listenForKeys, args=())
+    th.daemon = True
+    th.start()
 
-    webSocket.run_forever()
-
+    serialConsoleInstance = SerialConsole(cmd, resource_group_name, vm_name)
+    serialConsoleInstance.connect()
+    
+    th.join()
 
 
 
