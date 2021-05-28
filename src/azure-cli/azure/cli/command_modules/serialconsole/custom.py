@@ -8,40 +8,134 @@ import requests
 import json
 import websocket
 import threading
-import subprocess
+import sys
 
+
+webSocket = None
+terminalInstance = None
+
+def quitapp():
+    if webSocket:
+        webSocket.close()
+    if terminalInstance:
+        terminalInstance.revertTerminal()
+    quit()
+
+class Terminal:
+    def __init__(self):
+        self.winOriginalOutMode = None
+        self.winOriginalInMode = None
+        self.winOut = None
+        self.winIn = None
+        self.unixOriginalMode = None
+        
+    def configureTerminal(self):
+        import sys
+        if sys.platform.startswith('win'):
+            import ctypes
+            from ctypes import wintypes 
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
+            ENABLE_ECHO_INPUT = 0x0004
+            ENABLE_LINE_INPUT = 0x0002
+            ENABLE_PROCESSED_INPUT = 0x0001
+            STD_OUTPUT_HANDLE = -11
+            STD_INPUT_HANDLE = -10
+            DISABLE = ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)
+        
+            kernel32 = ctypes.windll.kernel32
+            dwOriginalOutMode = wintypes.DWORD()
+            dwOriginalInMode = wintypes.DWORD()
+            self.winOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            self.winIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+
+
+            if(not kernel32.GetConsoleMode(self.winOut, ctypes.byref(dwOriginalOutMode))):
+                quitapp()
+            if(not kernel32.GetConsoleMode(self.winIn, ctypes.byref(dwOriginalInMode))):
+                quitapp()
+
+            self.winOriginalOutMode = dwOriginalOutMode.value
+            self.winOriginalInMode = dwOriginalInMode.value
+
+            dwOutMode = self.winOriginalOutMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            dwInMode = (self.winOriginalInMode | ENABLE_VIRTUAL_TERMINAL_INPUT) & DISABLE
+            
+            if(not kernel32.SetConsoleMode(self.winOut, dwOutMode)):
+                quitapp()
+            if(not kernel32.SetConsoleMode(self.winIn, dwInMode)):
+                quitapp()
+        else:
+            import sys, tty, termios
+            fd = sys.stdin.fileno()
+            self.unixOriginalMode = termios.tcgetattr(fd)
+            tty.setraw(fd)
+    def revertTerminal(self):
+        import sys
+        if sys.platform.startswith('win'):
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            if(self.winOriginalOutMode):
+                kernel32.SetConsoleMode(self.winOut, self.winOriginalOutMode)
+            if(self.winOriginalInMode):
+                kernel32.SetConsoleMode(self.winIn, self.winOriginalInMode)
+        else:
+            import sys, termios
+            fd = sys.stdin.fileno()
+            if self.unixOriginalMode:
+                termios.tcsetattr(fd, termios.TCSADRAIN, self.unixOriginalMode)
+class _Getch:
+    def __init__(self):
+        import sys
+        if sys.platform.startswith('win'):
+            self.impl = _GetchWindows()
+        else:
+            self.impl = _GetchUnix()
+    def __call__(self): return self.impl()
+
+class _GetchWindows:
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+        STD_INPUT_HANDLE = -10
+        self.hIn = ctypes.windll.kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        self.lpBuffer = ctypes.create_string_buffer(1)
+        self.lpNumberOfCharsRead = wintypes.DWORD()
+        self.nNumberOfCharsToRead = wintypes.DWORD()
+        self.nNumberOfCharsToRead.value = 1
+    def __call__(self):
+        import ctypes
+        ctypes.windll.kernel32.ReadConsoleW(self.hIn, self.lpBuffer, self.nNumberOfCharsToRead, ctypes.byref(self.lpNumberOfCharsRead), None)
+        return self.lpBuffer.raw
+
+class _GetchUnix:
+    def __init__(self):
+        pass
+    def __call__(self):
+        import sys
+        return sys.stdin.read(1)
 
 def on_open(ws):
-    print("### OPENING ###")
+    print("### OPENING ###", end = "\r\n")
     import ctypes
-    from ctypes import wintypes 
-
-    #intialize variables to get characters from memory
-    kernel32 = ctypes.windll.kernel32
-    STD_INPUT_HANDLE = -10
-    hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
-    lpBuffer = ctypes.create_string_buffer(1)
-    lpNumberOfCharsRead = wintypes.DWORD()
-    nNumberOfCharsToRead = wintypes.DWORD()
-    nNumberOfCharsToRead.value = 1
+    from ctypes import wintypes
+    getch = _Getch()
 
     #listen for user input
     def listenForKeys():
         while(True):
-            r = kernel32.ReadConsoleW(hIn, lpBuffer, nNumberOfCharsToRead, ctypes.byref(lpNumberOfCharsRead), None)
-            if(lpBuffer.raw == b'\x1d'):
-                r2 = kernel32.ReadConsoleW(hIn, lpBuffer, nNumberOfCharsToRead, ctypes.byref(lpNumberOfCharsRead), None)
-                if(lpBuffer.raw == b'\x1d'):
-                    ws.send(lpBuffer.raw)
+            c = getch()
+            if(c == b'\x1d'):
+                c = getch()
+                if(c == b'\x1d'):
+                    ws.send(c)
                 else:
-                    print("\n### CLOSING1 ###")
-                    ws.close()
-                    break
+                    quitapp()
             try:
-                ws.send(lpBuffer.raw)
+                ws.send(c)
             except:
                 print("\n### CONNECTION CLOSED BY HOST ###")
-                quit()
+                quitapp()
     threading.Thread(target=listenForKeys, args=()).start()
 
 def on_message(ws, message):
@@ -51,38 +145,13 @@ def on_error(ws, error):
     print("### ERROR ###", error)
 
 def on_close(ws):
-    print("### CLOSING2 ###")
-
-def enableVirtualTerminal():
-    import ctypes
-    from ctypes import wintypes 
-    ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-    ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
-
-    ENABLE_ECHO_INPUT = 0x0004
-    ENABLE_LINE_INPUT = 0x0002
-    ENABLE_PROCESSED_INPUT = 0x0001
-
-    disable = ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)
-    
-    STD_OUTPUT_HANDLE = -11
-    STD_INPUT_HANDLE = -10
-    kernel32 = ctypes.windll.kernel32
-    hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
-    hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
-    dwOriginalOutMode = wintypes.DWORD()
-    kernel32.GetConsoleMode(hOut, ctypes.byref(dwOriginalOutMode))
-    dwOriginalInMode = wintypes.DWORD()
-    kernel32.GetConsoleMode(hIn, ctypes.byref(dwOriginalInMode))
-    dwOutMode = dwOriginalOutMode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING
-    dwInMode = (dwOriginalInMode.value | ENABLE_VIRTUAL_TERMINAL_INPUT) & disable
-    kernel32.SetConsoleMode(hOut, dwOutMode)
-    kernel32.SetConsoleMode(hIn, dwInMode)
+    print("\n### CLOSING ###")
 
 def connect_serialconsole(cmd, resource_group_name, vm_name):
     from azure.cli.core.commands.client_factory import get_subscription_id
-    from msrestazure.tools import is_valid_resource_id, resource_id
     from azure.cli.core._profile import Profile
+    global webSocket, terminalInstance
+
     armEndpoint = "https://management.azure.com"
     RP_PROVIDER = "Microsoft.SerialConsole"
     subscriptionId=get_subscription_id(cmd.cli_ctx)
@@ -95,19 +164,20 @@ def connect_serialconsole(cmd, resource_group_name, vm_name):
     connectionUrl = "%s/subscriptions/%s/resourcegroups/%s/providers/Microsoft.Compute/virtualMachines/%s/providers/%s/serialPorts/0/connect?api-version=2018-05-01" % (armEndpoint, subscriptionId, resource_group_name, vm_name, RP_PROVIDER)
     headers = {'authorization' : tokenType + " " + accessToken, 'accept' : applicationJsonFormat, 'origin' : serialConsoleUxProdUrl, 'content-type' : applicationJsonFormat, 'content-length' : "0"}
 
-    enableVirtualTerminal()
+    terminalInstance = Terminal()
+    terminalInstance.configureTerminal()
 
     result = requests.post(connectionUrl, headers = headers)
     websocketURL = json.loads(result.text)["connectionString"]
-    print(websocketURL)
+    print(websocketURL, end = "\r\n")
     
-    ws = websocket.WebSocketApp(websocketURL + "?authorization=" + accessToken,
+    webSocket = websocket.WebSocketApp(websocketURL + "?authorization=" + accessToken,
                                 on_open = on_open,
                                 on_message = on_message,
                                 on_error = on_error,
                                 on_close = on_close)
 
-    ws.run_forever()
+    webSocket.run_forever()
 
 
 
