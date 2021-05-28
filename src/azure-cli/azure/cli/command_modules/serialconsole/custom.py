@@ -14,11 +14,11 @@ import sys
 webSocket = None
 terminalInstance = None
 
-def quitapp():
-    if webSocket:
-        webSocket.close()
+def quitapp(fromWebsocket = False):
     if terminalInstance:
         terminalInstance.revertTerminal()
+    if not fromWebsocket and webSocket:
+        webSocket.close()
     quit()
 
 class Terminal:
@@ -75,9 +75,9 @@ class Terminal:
         if sys.platform.startswith('win'):
             import ctypes
             kernel32 = ctypes.windll.kernel32
-            if(self.winOriginalOutMode):
+            if self.winOriginalOutMode:
                 kernel32.SetConsoleMode(self.winOut, self.winOriginalOutMode)
-            if(self.winOriginalInMode):
+            if self.winOriginalInMode:
                 kernel32.SetConsoleMode(self.winIn, self.winOriginalInMode)
         else:
             import sys, termios
@@ -106,19 +106,17 @@ class _GetchWindows:
     def __call__(self):
         import ctypes
         ctypes.windll.kernel32.ReadConsoleW(self.hIn, self.lpBuffer, self.nNumberOfCharsToRead, ctypes.byref(self.lpNumberOfCharsRead), None)
-        return self.lpBuffer.raw
+        return chr(self.lpBuffer.raw[0]).encode()
 
 class _GetchUnix:
     def __init__(self):
         pass
     def __call__(self):
         import sys
-        return sys.stdin.read(1)
+        return sys.stdin.read(1).encode()
 
 def on_open(ws):
     print("### OPENING ###", end = "\r\n")
-    import ctypes
-    from ctypes import wintypes
     getch = _Getch()
 
     #listen for user input
@@ -134,7 +132,7 @@ def on_open(ws):
             try:
                 ws.send(c)
             except:
-                print("\n### CONNECTION CLOSED BY HOST ###")
+                print("\r\n### CONNECTION CLOSED BY HOST ###")
                 quitapp()
     threading.Thread(target=listenForKeys, args=()).start()
 
@@ -145,7 +143,10 @@ def on_error(ws, error):
     print("### ERROR ###", error)
 
 def on_close(ws):
-    print("\n### CLOSING ###")
+    if terminalInstance:
+        terminalInstance.revertTerminal()
+    print("\r\n### CLOSING ###")
+    quit()
 
 def connect_serialconsole(cmd, resource_group_name, vm_name):
     from azure.cli.core.commands.client_factory import get_subscription_id
