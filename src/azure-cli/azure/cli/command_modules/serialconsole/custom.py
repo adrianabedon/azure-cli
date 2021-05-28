@@ -15,78 +15,17 @@ webSocket = None
 terminalInstance = None
 
 def quitapp(fromWebsocket = False):
+    global terminalInstance, webSocket
     if terminalInstance:
         terminalInstance.revertTerminal()
+        terminalInstance = None
     if not fromWebsocket and webSocket:
         webSocket.close()
-    quit()
+        webSocket = None
+    sys.exit()
 
-class Terminal:
-    def __init__(self):
-        self.winOriginalOutMode = None
-        self.winOriginalInMode = None
-        self.winOut = None
-        self.winIn = None
-        self.unixOriginalMode = None
-        
-    def configureTerminal(self):
-        import sys
-        if sys.platform.startswith('win'):
-            import ctypes
-            from ctypes import wintypes 
-            ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-            ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
-            ENABLE_ECHO_INPUT = 0x0004
-            ENABLE_LINE_INPUT = 0x0002
-            ENABLE_PROCESSED_INPUT = 0x0001
-            STD_OUTPUT_HANDLE = -11
-            STD_INPUT_HANDLE = -10
-            DISABLE = ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)
-        
-            kernel32 = ctypes.windll.kernel32
-            dwOriginalOutMode = wintypes.DWORD()
-            dwOriginalInMode = wintypes.DWORD()
-            self.winOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
-            self.winIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
-
-
-            if(not kernel32.GetConsoleMode(self.winOut, ctypes.byref(dwOriginalOutMode))):
-                quitapp()
-            if(not kernel32.GetConsoleMode(self.winIn, ctypes.byref(dwOriginalInMode))):
-                quitapp()
-
-            self.winOriginalOutMode = dwOriginalOutMode.value
-            self.winOriginalInMode = dwOriginalInMode.value
-
-            dwOutMode = self.winOriginalOutMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING
-            dwInMode = (self.winOriginalInMode | ENABLE_VIRTUAL_TERMINAL_INPUT) & DISABLE
-            
-            if(not kernel32.SetConsoleMode(self.winOut, dwOutMode)):
-                quitapp()
-            if(not kernel32.SetConsoleMode(self.winIn, dwInMode)):
-                quitapp()
-        else:
-            import sys, tty, termios
-            fd = sys.stdin.fileno()
-            self.unixOriginalMode = termios.tcgetattr(fd)
-            tty.setraw(fd)
-    def revertTerminal(self):
-        import sys
-        if sys.platform.startswith('win'):
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            if self.winOriginalOutMode:
-                kernel32.SetConsoleMode(self.winOut, self.winOriginalOutMode)
-            if self.winOriginalInMode:
-                kernel32.SetConsoleMode(self.winIn, self.winOriginalInMode)
-        else:
-            import sys, termios
-            fd = sys.stdin.fileno()
-            if self.unixOriginalMode:
-                termios.tcsetattr(fd, termios.TCSADRAIN, self.unixOriginalMode)
 class _Getch:
     def __init__(self):
-        import sys
         if sys.platform.startswith('win'):
             self.impl = _GetchWindows()
         else:
@@ -112,8 +51,74 @@ class _GetchUnix:
     def __init__(self):
         pass
     def __call__(self):
-        import sys
         return sys.stdin.read(1).encode()
+
+class Terminal:
+    def __init__(self):
+        self.winOriginalOutMode = None
+        self.winOriginalInMode = None
+        self.winOut = None
+        self.winIn = None
+        self.unixOriginalMode = None
+        
+    def configureTerminal(self):
+        if sys.platform.startswith('win'):
+            import ctypes
+            from ctypes import wintypes 
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
+            ENABLE_ECHO_INPUT = 0x0004
+            ENABLE_LINE_INPUT = 0x0002
+            ENABLE_PROCESSED_INPUT = 0x0001
+            STD_OUTPUT_HANDLE = -11
+            STD_INPUT_HANDLE = -10
+            DISABLE = ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)
+        
+            kernel32 = ctypes.windll.kernel32
+            dwOriginalOutMode = wintypes.DWORD()
+            dwOriginalInMode = wintypes.DWORD()
+            self.winOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            self.winIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+
+            if(not kernel32.GetConsoleMode(self.winOut, ctypes.byref(dwOriginalOutMode))):
+                quitapp()
+            if(not kernel32.GetConsoleMode(self.winIn, ctypes.byref(dwOriginalInMode))):
+                quitapp()
+
+            self.winOriginalOutMode = dwOriginalOutMode.value
+            self.winOriginalInMode = dwOriginalInMode.value
+
+            dwOutMode = self.winOriginalOutMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            dwInMode = (self.winOriginalInMode | ENABLE_VIRTUAL_TERMINAL_INPUT) & DISABLE
+            
+            if(not kernel32.SetConsoleMode(self.winOut, dwOutMode)):
+                quitapp()
+            if(not kernel32.SetConsoleMode(self.winIn, dwInMode)):
+                quitapp()
+        else:
+            import tty, termios
+            try:
+                fd = sys.stdin.fileno()
+            except:
+                quitapp()
+            self.unixOriginalMode = termios.tcgetattr(fd)
+            tty.setraw(fd)
+    def revertTerminal(self):
+        if sys.platform.startswith('win'):
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            if self.winOriginalOutMode:
+                kernel32.SetConsoleMode(self.winOut, self.winOriginalOutMode)
+            if self.winOriginalInMode:
+                kernel32.SetConsoleMode(self.winIn, self.winOriginalInMode)
+        else:
+            import termios
+            if self.unixOriginalMode:
+                try:
+                    fd = sys.stdin.fileno()
+                except:
+                    return
+                termios.tcsetattr(fd, termios.TCSADRAIN, self.unixOriginalMode)
 
 def on_open(ws):
     print("### OPENING ###", end = "\r\n")
@@ -134,19 +139,22 @@ def on_open(ws):
             except:
                 print("\r\n### CONNECTION CLOSED BY HOST ###")
                 quitapp()
-    threading.Thread(target=listenForKeys, args=()).start()
+    th = threading.Thread(target=listenForKeys, args=())
+    th.daemon = True
+    th.start()
 
 def on_message(ws, message):
     print(message, end='', flush=True)
 
 def on_error(ws, error):
-    print("### ERROR ###", error)
+    # print("\r\n### ERROR ###", error, end = "\r\n")
+    pass
 
 def on_close(ws):
     if terminalInstance:
         terminalInstance.revertTerminal()
-    print("\r\n### CLOSING ###")
-    quit()
+    print("\r\n### CLOSING ###", end = "\r\n")
+    sys.exit()
 
 def connect_serialconsole(cmd, resource_group_name, vm_name):
     from azure.cli.core.commands.client_factory import get_subscription_id
