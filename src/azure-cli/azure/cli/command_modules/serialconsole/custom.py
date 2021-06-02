@@ -25,9 +25,11 @@ class GlobalVariables:
 GV = GlobalVariables()
 
 
-def quitapp(fromWebsocket=False):
+def quitapp(fromWebsocket=False, message=None):
+    if message:
+        print(message, end="\r\n")
     GV.terminatingApp = True
-    GV.loading = True
+    GV.loading = False
     if GV.terminalInstance:
         GV.terminalInstance.revertTerminal()
         GV.terminalInstance = None
@@ -60,13 +62,14 @@ class _Getch:
 
     def _getchWindows(self):
         import ctypes
-        # TODO Error checking
-        ctypes.windll.kernel32.ReadConsoleW(self.hIn,
-                                            self.lpBuffer,
-                                            self.nNumberOfCharsToRead,
-                                            ctypes.byref(
-                                                self.lpNumberOfCharsRead),
-                                            None)
+        status = ctypes.windll.kernel32.ReadConsoleW(self.hIn,
+                                                     self.lpBuffer,
+                                                     self.nNumberOfCharsToRead,
+                                                     ctypes.byref(
+                                                         self.lpNumberOfCharsRead),
+                                                     None)
+        if status == 0:
+            quitapp()
         return chr(self.lpBuffer.raw[0]).encode()
 
 
@@ -97,11 +100,12 @@ class Terminal:
             dwOriginalInMode = wintypes.DWORD()
             self.winOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
             self.winIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+            errorMessage = "Error configuring terminal: Make sure that app in running in a Windows 10 console."
 
             if not kernel32.GetConsoleMode(self.winOut, ctypes.byref(dwOriginalOutMode)):
-                quitapp()
+                quitapp(message=errorMessage)
             if not kernel32.GetConsoleMode(self.winIn, ctypes.byref(dwOriginalInMode)):
-                quitapp()
+                quitapp(message=errorMessage)
 
             self.winOriginalOutMode = dwOriginalOutMode.value
             self.winOriginalInMode = dwOriginalInMode.value
@@ -111,16 +115,17 @@ class Terminal:
                         ENABLE_VIRTUAL_TERMINAL_INPUT) & DISABLE
 
             if not kernel32.SetConsoleMode(self.winOut, dwOutMode):
-                quitapp()
+                quitapp(message=errorMessage)
             if not kernel32.SetConsoleMode(self.winIn, dwInMode):
-                quitapp()
+                quitapp(message=errorMessage)
         else:
             import tty
             import termios
+            errorMessage = "Error configuring terminal: Make sure that app in running in a terminal."
             try:
                 fd = sys.stdin.fileno()
-            except:
-                quitapp()
+            except ValueError:
+                quitapp(message=errorMessage)
             self.unixOriginalMode = termios.tcgetattr(fd)
             tty.setraw(fd)
 
@@ -137,7 +142,7 @@ class Terminal:
             if self.unixOriginalMode:
                 try:
                     fd = sys.stdin.fileno()
-                except:
+                except ValueError:
                     return
                 termios.tcsetattr(fd, termios.TCSADRAIN, self.unixOriginalMode)
 
@@ -165,8 +170,9 @@ def listenForKeys():
                 if c != b'\x1d':
                     continue
             try:
-                GV.webSocket.send(c)
-            except:
+                if GV.webSocket:
+                    GV.webSocket.send(c)
+            except (AttributeError, websocket.WebSocketConnectionClosedException):
                 pass
         else:
             if c == b'\r':
@@ -192,6 +198,7 @@ class SerialConsole:
         self.websocketURL = None
         self.accessToken = None
 
+    # Returns True if successful, False otherwise
     def loadWebSocketURL(self):
         from azure.cli.core._profile import Profile
         tokenInfo, _, _ = Profile().get_raw_token()
@@ -204,7 +211,11 @@ class SerialConsole:
                    'content-type': applicationJsonFormat,
                    'content-length': "0"}
         result = requests.post(self.connectionUrl, headers=headers)
-        self.websocketURL = json.loads(result.text)["connectionString"]
+        if result.status_code == 200:
+            self.websocketURL = json.loads(result.text)["connectionString"]
+            return True
+        else:
+            return False
 
     def connect(self):
         def on_open(_):
@@ -221,23 +232,27 @@ class SerialConsole:
             GV.loading = False
             if not GV.terminatingApp:
                 print(
-                    "\r\n### Connection Closed: Press Enter to reconnect... ###", end="\r\n")
+                    "\r\n### Connection Closed: Press Enter to reconnect...", end="\r\n")
                 GV.webSocket = None
 
         def connectThread():
-            self.loadWebSocketURL()
-            GV.webSocket = websocket.WebSocketApp(self.websocketURL + "?authorization=" + self.accessToken,
-                                                  on_open=on_open,
-                                                  on_message=on_message,
-                                                  on_error=on_error,
-                                                  on_close=on_close)
-            GV.webSocket.run_forever()
+            if self.loadWebSocketURL():
+                GV.webSocket = websocket.WebSocketApp(self.websocketURL + "?authorization=" + self.accessToken,
+                                                      on_open=on_open,
+                                                      on_message=on_message,
+                                                      on_error=on_error,
+                                                      on_close=on_close)
+                GV.webSocket.run_forever()
+            else:
+                GV.loading = False
+                print(
+                    "\r\n### Connection failed: Press Enter to try again...", end="\r\n")
 
         def loadingMessage():
             dots = 0
             while GV.loading:
-                print("### Opening" + "." * (dots + 1) + "   ", end="\r", flush=True)
-                dots = (dots + 1) % 3
+                print("### Opening" + "." * dots + "   ", end="\r", flush=True)
+                dots = (dots + 1) % 4
                 time.sleep(0.5)
         GV.loading = True
 
@@ -250,16 +265,17 @@ class SerialConsole:
         th2.start()
 
     def sendAdminCommand(self, command, commandParameters):
-        url = self.websocketURL.replace("wss", "https").replace(
-            "ws", "http").replace("/client", "/adminCommand/" + command)
-        headers = {'accept': "application/json",
-                   'authorization': "Bearer " + self.accessToken,
-                   'accept-language': "en",
-                   'content-type': "application/json"}
-        data = {'command': command,
-                'requestId': str(uuid.uuid4()),
-                'commandParameters': commandParameters}
-        requests.post(url, headers=headers, data=json.dumps(data))
+        if self.websocketURL and self.accessToken:
+            url = self.websocketURL.replace("wss", "https").replace(
+                "ws", "http").replace("/client", "/adminCommand/" + command)
+            headers = {'accept': "application/json",
+                       'authorization': "Bearer " + self.accessToken,
+                       'accept-language': "en",
+                       'content-type': "application/json"}
+            data = {'command': command,
+                    'requestId': str(uuid.uuid4()),
+                    'commandParameters': commandParameters}
+            requests.post(url, headers=headers, data=json.dumps(data))
 
     def sendNMI(self):
         self.sendAdminCommand("nmi", {})
