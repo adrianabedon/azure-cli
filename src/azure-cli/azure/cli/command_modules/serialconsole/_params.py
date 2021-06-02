@@ -14,7 +14,7 @@ def load_arguments(self, _):
     from azure.cli.core.commands.parameters import resource_group_name_type
     from azure.cli.core.commands.validators import get_default_location_from_resource_group
 
-    serialconsole_name_type = CLIArgumentType(options_list='--serialconsole-name-name', help='Name of the Serialconsole.', id_part='name')
+    # serialconsole_name_type = CLIArgumentType(options_list='--serialconsole-name-name', help='Name of the Serialconsole.', id_part='name')
 
     with self.argument_context('serialconsole') as c:
         c.argument('resource_group_name', arg_type = resource_group_name_type)

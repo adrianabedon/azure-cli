@@ -23,5 +23,6 @@ def load_command_table(self, _):
         # g.generic_update_command('update', setter_name='update', custom_func_name='update_serialconsole')
 
 
-    with self.command_group('serialconsole', is_preview=True):
-        pass
+    # with self.command_group('serialconsole', is_preview=True):
+    #     pass
+    
