@@ -3,7 +3,7 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
-from knack.util import CLIError
+# from knack.util import CLIError
 import requests
 import json
 import websocket
@@ -13,29 +13,33 @@ import uuid
 import time
 
 
-webSocket = None
-terminalInstance = None
-serialConsoleInstance = None
-terminatingApp = False
-loading = True
+class GlobalVariables:
+    def __init__(self):
+        self.webSocket = None
+        self.terminalInstance = None
+        self.serialConsoleInstance = None
+        self.terminatingApp = False
+        self.loading = True
+
+
+GV = GlobalVariables()
 
 
 def quitapp(fromWebsocket=False):
-    global terminalInstance, webSocket, terminatingApp, loading
-    terminatingApp = True
-    loading = True
-    if terminalInstance:
-        terminalInstance.revertTerminal()
-        terminalInstance = None
-    if not fromWebsocket and webSocket:
-        webSocket.close()
-        webSocket = None
+    GV.terminatingApp = True
+    GV.loading = True
+    if GV.terminalInstance:
+        GV.terminalInstance.revertTerminal()
+        GV.terminalInstance = None
+    if not fromWebsocket and GV.webSocket:
+        GV.webSocket.close()
+        GV.webSocket = None
     sys.exit()
 
 
 class _Getch:
-    class _GetchWindows:
-        def __init__(self):
+    def __init__(self):
+        if sys.platform.startswith('win'):
             import ctypes
             from ctypes import wintypes
             STD_INPUT_HANDLE = -10
@@ -44,32 +48,26 @@ class _Getch:
             self.lpNumberOfCharsRead = wintypes.DWORD()
             self.nNumberOfCharsToRead = wintypes.DWORD()
             self.nNumberOfCharsToRead.value = 1
-
-        def __call__(self):
-            import ctypes
-            ctypes.windll.kernel32.ReadConsoleW(self.hIn,
-                                                self.lpBuffer,
-                                                self.nNumberOfCharsToRead,
-                                                ctypes.byref(
-                                                    self.lpNumberOfCharsRead),
-                                                None)
-            return chr(self.lpBuffer.raw[0]).encode()
-
-    class _GetchUnix:
-        def __init__(self):
-            pass
-
-        def __call__(self):
-            return sys.stdin.read(1).encode()
-
-    def __init__(self):
-        if sys.platform.startswith('win'):
-            self.impl = self._GetchWindows()
+            self.impl = self._getchWindows
         else:
-            self.impl = self._GetchUnix()
+            self.impl = self._getchUnix
 
     def __call__(self):
         return self.impl()
+
+    def _getchUnix(self):
+        return sys.stdin.read(1).encode()
+
+    def _getchWindows(self):
+        import ctypes
+        # TODO Error checking
+        ctypes.windll.kernel32.ReadConsoleW(self.hIn,
+                                            self.lpBuffer,
+                                            self.nNumberOfCharsToRead,
+                                            ctypes.byref(
+                                                self.lpNumberOfCharsRead),
+                                            None)
+        return chr(self.lpBuffer.raw[0]).encode()
 
 
 class Terminal:
@@ -145,40 +143,40 @@ class Terminal:
 
 
 def listenForKeys():
-    global webSocket, serialConsoleInstance
     getch = _Getch()
     while True:
         c = getch()
-        if webSocket:
+        if GV.webSocket:
             if c == b'\x1d':
                 c = getch()
                 if c == b'n':
-                    serialConsoleInstance.sendNMI()
+                    GV.serialConsoleInstance.sendNMI()
                     continue
-                elif c == b'r':
-                    serialConsoleInstance.sendReset()
+                if c == b'r':
+                    GV.serialConsoleInstance.sendReset()
                     continue
-                elif c == b's':
+                if c == b's':
                     c = getch()
-                    serialConsoleInstance.sendSysRq(c.decode())
+                    GV.serialConsoleInstance.sendSysRq(c.decode())
                     continue
-                elif c == b'q':
+                if c == b'q':
                     quitapp()
                     return
-                elif c != b'\x1d':
+                if c != b'\x1d':
                     continue
             try:
-                webSocket.send(c)
+                GV.webSocket.send(c)
             except:
                 pass
         else:
             if c == b'\r':
-                serialConsoleInstance.connect()
+                GV.serialConsoleInstance.connect()
             elif c == b'\x1d':
                 c = getch()
                 if c == b'q':
                     quitapp()
                     return
+
 
 class SerialConsole:
     def __init__(self, cmd, resource_group_name, vm_name):
@@ -192,52 +190,56 @@ class SerialConsole:
                               "/connect?api-version=2018-05-01"
                               ) % (armEndpoint, subscriptionId, resource_group_name, vm_name, RP_PROVIDER)
         self.websocketURL = None
+        self.accessToken = None
+
+    def loadWebSocketURL(self):
+        from azure.cli.core._profile import Profile
+        tokenInfo, _, _ = Profile().get_raw_token()
+        self.accessToken = tokenInfo[1]
+        applicationJsonFormat = "application/json"
+        serialConsoleUxProdUrl = "https://portal.serialconsole.azure.com"
+        headers = {'authorization': "Bearer " + self.accessToken,
+                   'accept': applicationJsonFormat,
+                   'origin': serialConsoleUxProdUrl,
+                   'content-type': applicationJsonFormat,
+                   'content-length': "0"}
+        result = requests.post(self.connectionUrl, headers=headers)
+        self.websocketURL = json.loads(result.text)["connectionString"]
 
     def connect(self):
-        def on_open(ws):
-            # print("### OPENING ###", end="\r\n")
+        def on_open(_):
             pass
-        def on_message(ws, message):
-            global loading
-            loading = False
+
+        def on_message(_, message):
+            GV.loading = False
             print(message, end='', flush=True)
-        def on_error(ws, error):
+
+        def on_error(*_):
             pass
-        def on_close(ws):
-            global webSocket, terminatingApp, loading
-            loading = False
-            if not terminatingApp:
-                print("\r\n### Connection Closed: Press Enter to reconnect... ###", end="\r\n")
-                webSocket = None
+
+        def on_close(_):
+            GV.loading = False
+            if not GV.terminatingApp:
+                print(
+                    "\r\n### Connection Closed: Press Enter to reconnect... ###", end="\r\n")
+                GV.webSocket = None
+
         def connectThread():
-            from azure.cli.core._profile import Profile
-            global webSocket
-            tokenInfo, _, _ = Profile().get_raw_token()
-            tokenType = tokenInfo[0]
-            accessToken = tokenInfo[1]
-            applicationJsonFormat = "application/json"
-            serialConsoleUxProdUrl = "https://portal.serialconsole.azure.com"
-            headers = {'authorization': tokenType + " " + accessToken,
-                       'accept': applicationJsonFormat,
-                       'origin': serialConsoleUxProdUrl,
-                       'content-type': applicationJsonFormat,
-                       'content-length': "0"}
-            result = requests.post(self.connectionUrl, headers=headers)
-            self.websocketURL = json.loads(result.text)["connectionString"]
-            webSocket = websocket.WebSocketApp(self.websocketURL + "?authorization=" + accessToken,
-                                               on_open=on_open,
-                                               on_message=on_message,
-                                               on_error=on_error,
-                                               on_close=on_close)
-            webSocket.run_forever()
+            self.loadWebSocketURL()
+            GV.webSocket = websocket.WebSocketApp(self.websocketURL + "?authorization=" + self.accessToken,
+                                                  on_open=on_open,
+                                                  on_message=on_message,
+                                                  on_error=on_error,
+                                                  on_close=on_close)
+            GV.webSocket.run_forever()
+
         def loadingMessage():
             dots = 0
-            while loading:
-                print("### Opening"+"."*(dots+1)+"   ", end="\r", flush=True)
-                dots = (dots+1) % 3
+            while GV.loading:
+                print("### Opening" + "." * (dots + 1) + "   ", end="\r", flush=True)
+                dots = (dots + 1) % 3
                 time.sleep(0.5)
-        global loading
-        loading = True
+        GV.loading = True
 
         th1 = threading.Thread(target=loadingMessage, args=())
         th1.daemon = True
@@ -248,40 +250,36 @@ class SerialConsole:
         th2.start()
 
     def sendAdminCommand(self, command, commandParameters):
-        from azure.cli.core._profile import Profile
-        tokenInfo, _, _ = Profile().get_raw_token()
-        tokenType = tokenInfo[0]
-        accessToken = tokenInfo[1]
-        url = self.websocketURL.replace("wss", "https").replace("ws", "http").replace("/client", "/adminCommand/" + command)
-        headers = {'accept' : "application/json",
-                   'authorization': tokenType + " " + accessToken,
+        url = self.websocketURL.replace("wss", "https").replace(
+            "ws", "http").replace("/client", "/adminCommand/" + command)
+        headers = {'accept': "application/json",
+                   'authorization': "Bearer " + self.accessToken,
                    'accept-language': "en",
-                   'content-type' : "application/json"}
-        data = {'command' : command,
-                'requestId' : str(uuid.uuid4()),
-                'commandParameters' : commandParameters}
+                   'content-type': "application/json"}
+        data = {'command': command,
+                'requestId': str(uuid.uuid4()),
+                'commandParameters': commandParameters}
         requests.post(url, headers=headers, data=json.dumps(data))
-    
+
     def sendNMI(self):
         self.sendAdminCommand("nmi", {})
-    
+
     def sendReset(self):
         self.sendAdminCommand("reset", {})
-    
+
     def sendSysRq(self, key):
-        self.sendAdminCommand("sysrq", {"SysRqCommand" : key})
+        self.sendAdminCommand("sysrq", {"SysRqCommand": key})
+
 
 def connect_serialconsole(cmd, resource_group_name, vm_name):
-    global terminalInstance, serialConsoleInstance
-
-    terminalInstance = Terminal()
-    terminalInstance.configureTerminal()
+    GV.terminalInstance = Terminal()
+    GV.terminalInstance.configureTerminal()
 
     th = threading.Thread(target=listenForKeys, args=())
     th.daemon = True
     th.start()
 
-    serialConsoleInstance = SerialConsole(cmd, resource_group_name, vm_name)
-    serialConsoleInstance.connect()
+    GV.serialConsoleInstance = SerialConsole(cmd, resource_group_name, vm_name)
+    GV.serialConsoleInstance.connect()
 
     th.join()
