@@ -20,14 +20,14 @@ class GlobalVariables:
         self.serialConsoleInstance = None
         self.terminatingApp = False
         self.loading = True
+        self.firstMessage = True
 
 
 GV = GlobalVariables()
 
 
-def quitapp(fromWebsocket=False, message=None):
-    if message:
-        print(message, end="\r\n")
+def quitapp(fromWebsocket=False, message=""):
+    print("\x1b[31m" + message + "\x1b[0m", end="\r\n", flush=True)
     GV.terminatingApp = True
     GV.loading = False
     if GV.terminalInstance:
@@ -185,16 +185,16 @@ def listenForKeys():
 
 
 class SerialConsole:
-    def __init__(self, cmd, resource_group_name, vm_name):
+    def __init__(self, cmd, resource_group_name, vm_vmss_name, vmss_instanceid):
         from azure.cli.core.commands.client_factory import get_subscription_id
         armEndpoint = "https://management.azure.com"
         RP_PROVIDER = "Microsoft.SerialConsole"
         subscriptionId = get_subscription_id(cmd.cli_ctx)
-        self.connectionUrl = ("%s/subscriptions/%s/resourcegroups/%s"
-                              "/providers/Microsoft.Compute/virtualMachines/%s"
-                              "/providers/%s/serialPorts/0"
-                              "/connect?api-version=2018-05-01"
-                              ) % (armEndpoint, subscriptionId, resource_group_name, vm_name, RP_PROVIDER)
+        vmPath = f"virtualMachineScaleSets/{vm_vmss_name}/virtualMachines/{vmss_instanceid}" if vmss_instanceid else f"virtualMachines/{vm_vmss_name}"
+        self.connectionUrl = (f"{armEndpoint}/subscriptions/{subscriptionId}/resourcegroups/{resource_group_name}"
+                              f"/providers/Microsoft.Compute/{vmPath}"
+                              f"/providers/{RP_PROVIDER}/serialPorts/0"
+                              f"/connect?api-version=2018-05-01")
         self.websocketURL = None
         self.accessToken = None
 
@@ -204,24 +204,25 @@ class SerialConsole:
         tokenInfo, _, _ = Profile().get_raw_token()
         self.accessToken = tokenInfo[1]
         applicationJsonFormat = "application/json"
-        serialConsoleUxProdUrl = "https://portal.serialconsole.azure.com"
         headers = {'authorization': "Bearer " + self.accessToken,
                    'accept': applicationJsonFormat,
-                   'origin': serialConsoleUxProdUrl,
-                   'content-type': applicationJsonFormat,
-                   'content-length': "0"}
+                   'content-type': applicationJsonFormat}
         result = requests.post(self.connectionUrl, headers=headers)
-        if result.status_code == 200:
-            self.websocketURL = json.loads(result.text)["connectionString"]
+        jsonResults = json.loads(result.text)
+        if result.status_code == 200 and "connectionString" in jsonResults:
+            self.websocketURL = jsonResults["connectionString"]
             return True
-        else:
-            return False
+
+        return False
 
     def connect(self):
         def on_open(_):
             pass
 
         def on_message(_, message):
+            if GV.firstMessage:
+                print("\x1b[2J\x1b[0;0H", end='', flush=True)
+            GV.firstMessage = False
             GV.loading = False
             print(message, end='', flush=True)
 
@@ -232,7 +233,7 @@ class SerialConsole:
             GV.loading = False
             if not GV.terminatingApp:
                 print(
-                    "\r\n### Connection Closed: Press Enter to reconnect...", end="\r\n")
+                    "\r\n\x1b[31m### Connection Closed: Press Enter to reconnect...\x1b[0m", end="\r\n")
                 GV.webSocket = None
 
         def connectThread():
@@ -246,15 +247,16 @@ class SerialConsole:
             else:
                 GV.loading = False
                 print(
-                    "\r\n### Connection failed: Press Enter to try again...", end="\r\n")
+                    "\r\n\x1b[31m### Could not establish connection to VM or VMSS. Make sure that input parameters are correct or press Enter to try again...\x1b[0m", end="\r\n")
 
         def loadingMessage():
             dots = 0
             while GV.loading:
-                print("### Opening" + "." * dots + "   ", end="\r", flush=True)
+                print("\x1b[2J\x1b[0;0H\x1b[36m### Opening" + "." * dots + "\x1b[0m", end="", flush=True)
                 dots = (dots + 1) % 4
                 time.sleep(0.5)
         GV.loading = True
+        GV.firstMessage = True
 
         th1 = threading.Thread(target=loadingMessage, args=())
         th1.daemon = True
@@ -287,7 +289,7 @@ class SerialConsole:
         self.sendAdminCommand("sysrq", {"SysRqCommand": key})
 
 
-def connect_serialconsole(cmd, resource_group_name, vm_name):
+def connect_serialconsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid=None):
     GV.terminalInstance = Terminal()
     GV.terminalInstance.configureTerminal()
 
@@ -295,7 +297,7 @@ def connect_serialconsole(cmd, resource_group_name, vm_name):
     th.daemon = True
     th.start()
 
-    GV.serialConsoleInstance = SerialConsole(cmd, resource_group_name, vm_name)
+    GV.serialConsoleInstance = SerialConsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
     GV.serialConsoleInstance.connect()
 
     th.join()
