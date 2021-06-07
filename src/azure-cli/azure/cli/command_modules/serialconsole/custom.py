@@ -11,6 +11,7 @@ import threading
 import sys
 import uuid
 import time
+import re
 
 
 class GlobalVariables:
@@ -21,13 +22,51 @@ class GlobalVariables:
         self.terminatingApp = False
         self.loading = True
         self.firstMessage = True
+        self.lastPrintedLine = ""
+        self.blockPrint = False
 
+
+class PrintClass:
+    CYAN = 36
+    YELLOW = 33
+    RED = 91
+
+    def __init__(self, GV):
+        self.messageBuffer = ""
+        self.GV = GV
+
+    def print(self, message, color=None, buffer=True):
+        if color:
+            message = "\x1b[" + str(color) + "m" + message + "\x1b[0m"
+        if self.GV.blockPrint and buffer:
+            self.messageBuffer += message
+        else:
+            if not self.GV.blockPrint:
+                self.emptyMessageBuffer()
+            print(message, end="", flush=True)
+
+    def clearScreen(self, buffer=True):
+        self.print("\x1b[2J\x1b[0;0H", buffer=buffer)
+
+    def clearLine(self, buffer=True):
+        self.print("\x1b[2K\x1b[1G", buffer=buffer)
+
+    def cursorUp(self, buffer=True):
+        self.print("\x1b[A", buffer=buffer)
+
+    def setCursorHorizontalPosition(self, col, buffer=True):
+        self.print("\x1b[" + str(col) + "G", buffer=buffer)
+
+    def emptyMessageBuffer(self):
+        print(self.messageBuffer, end="", flush=True)
+        self.messageBuffer = ""
 
 GV = GlobalVariables()
+PC = PrintClass(GV)
 
 
 def quitapp(fromWebsocket=False, message=""):
-    print("\x1b[31m" + message + "\x1b[0m", end="\r\n", flush=True)
+    PC.print(message + "\r\n", color=PrintClass.RED)
     GV.terminatingApp = True
     GV.loading = False
     if GV.terminalInstance:
@@ -147,21 +186,57 @@ class Terminal:
                 termios.tcsetattr(fd, termios.TCSADRAIN, self.unixOriginalMode)
 
 
+def getCursorPosition(getch):
+    print("\x1b[6n", end="", flush=True)
+    buf = ""
+    while(True):
+        c = getch().decode()
+        buf += c
+        if c == "R":
+            break
+    try:
+        matches = re.match(r"^\x1b\[(\d*);(\d*)R", buf)
+        groups = matches.groups()
+    except AttributeError:
+        return 1, 1
+    return int(groups[0]), int(groups[1])
+
+
+def prompt(getch, message, lines=1):
+    GV.blockPrint = True
+    _, col = getCursorPosition(getch)
+    PC.print("\r\n" + message, color=PrintClass.YELLOW, buffer=False)
+    c = getch()
+    for _ in range(lines):
+        PC.clearLine(buffer=False)
+        PC.cursorUp(buffer=False)
+    PC.setCursorHorizontalPosition(col, buffer=False)
+    PC.emptyMessageBuffer()
+    GV.blockPrint = False
+    return c
+
+
 def listenForKeys():
     getch = _Getch()
     while True:
         c = getch()
         if GV.webSocket:
             if c == b'\x1d':
-                c = getch()
+                c = prompt(
+                    getch, "Press n for NMI | s for SysRq | r to Reset VM |\r\nq to quit Console | CTRL + ] to forward input |", lines=2)
                 if c == b'n':
-                    GV.serialConsoleInstance.sendNMI()
+                    c = prompt(getch, "Warning: A Non-Maskable Interrupt (NMI) is used in debugging\r\nscenarios and is designed to crash your target Virtual Machine.\r\nAre you sure you want to send an NMI? (Y/n): ", lines=3)
+                    if c == b"Y":
+                        GV.serialConsoleInstance.sendNMI()
                     continue
                 if c == b'r':
-                    GV.serialConsoleInstance.sendReset()
+                    c = prompt(getch, "Warning: This results in a hard restart, like powering the computer\r\ndown, then back up again. This can result in data loss in the virtual\r\nmachine. You should only perform this operation if a graceful restart\r\nis not effective.\r\nAre you sure you want to Hard Reset the VM? (Y/n): ", lines=5)
+                    if c == b"Y":
+                        GV.serialConsoleInstance.sendReset()
                     continue
                 if c == b's':
-                    c = getch()
+                    c = prompt(
+                        getch, "Which SysRq command would you like to send? Press h for help: ")
                     GV.serialConsoleInstance.sendSysRq(c.decode())
                     continue
                 if c == b'q':
@@ -221,10 +296,10 @@ class SerialConsole:
 
         def on_message(_, message):
             if GV.firstMessage:
-                print("\x1b[2J\x1b[0;0H", end='', flush=True)
+                PC.clearScreen()
             GV.firstMessage = False
             GV.loading = False
-            print(message, end='', flush=True)
+            PC.print(message)
 
         def on_error(*_):
             pass
@@ -232,8 +307,8 @@ class SerialConsole:
         def on_close(_):
             GV.loading = False
             if not GV.terminatingApp:
-                print(
-                    "\r\n\x1b[31m### Connection Closed: Press Enter to reconnect...\x1b[0m", end="\r\n")
+                PC.print(
+                    "\r\nConnection Closed: Press Enter to reconnect...", color=PrintClass.RED)
                 GV.webSocket = None
 
         def connectThread():
@@ -246,14 +321,24 @@ class SerialConsole:
                 GV.webSocket.run_forever()
             else:
                 GV.loading = False
-                print(
-                    "\r\n\x1b[31m### Could not establish connection to VM or VMSS. Make sure that input parameters are correct or press Enter to try again...\x1b[0m", end="\r\n")
+                PC.print(
+                    "\r\nCould not establish connection to VM or VMSS. Make sure that input parameters are correct or press Enter to try again...", color=PrintClass.RED)
 
         def loadingMessage():
-            dots = 0
+            PC.clearScreen()
+            PC.print("For more information on the Azure Serial Console, see <https://aka.ms/serialconsolelinux>.\r\n",
+                     color=PrintClass.YELLOW)
+            indx = 0
+            numberOfSquares = 3
+            chars = ["\u25A1"] * numberOfSquares
             while GV.loading:
-                print("\x1b[2J\x1b[0;0H\x1b[36m### Opening" + "." * dots + "\x1b[0m", end="", flush=True)
-                dots = (dots + 1) % 4
+                charsCopy = chars.copy()
+                charsCopy[indx] = "\u25A0"
+                squares = " ".join(charsCopy)
+                PC.clearLine()
+                PC.print("Connecting to console of VM   " +
+                         squares, color=PrintClass.CYAN)
+                indx = (indx + 1) % numberOfSquares
                 time.sleep(0.5)
         GV.loading = True
         GV.firstMessage = True
@@ -297,7 +382,8 @@ def connect_serialconsole(cmd, resource_group_name, vm_vmss_name, vmss_instancei
     th.daemon = True
     th.start()
 
-    GV.serialConsoleInstance = SerialConsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
+    GV.serialConsoleInstance = SerialConsole(
+        cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
     GV.serialConsoleInstance.connect()
 
     th.join()
