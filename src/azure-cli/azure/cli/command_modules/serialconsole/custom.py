@@ -4,6 +4,8 @@
 # --------------------------------------------------------------------------------------------
 
 # from knack.util import CLIError
+import numpy
+import wsaccel
 import requests
 import json
 import websocket
@@ -22,9 +24,8 @@ class GlobalVariables:
         self.terminatingApp = False
         self.loading = True
         self.firstMessage = True
-        self.lastPrintedLine = ""
         self.blockPrint = False
-
+        self.trycount = 0
 
 class PrintClass:
     CYAN = 36
@@ -60,6 +61,20 @@ class PrintClass:
     def emptyMessageBuffer(self):
         print(self.messageBuffer, end="", flush=True)
         self.messageBuffer = ""
+    def getCursorPosition(self,getch):
+        self.print("\x1b[6n", buffer=False)
+        buf = ""
+        while True:
+            c = getch().decode()
+            buf += c
+            if c == "R":
+                break
+        try:
+            matches = re.match(r"^\x1b\[(\d*);(\d*)R", buf)
+            groups = matches.groups()
+        except AttributeError:
+            return 1, 1
+        return int(groups[0]), int(groups[1])
 
 GV = GlobalVariables()
 PC = PrintClass(GV)
@@ -186,25 +201,9 @@ class Terminal:
                 termios.tcsetattr(fd, termios.TCSADRAIN, self.unixOriginalMode)
 
 
-def getCursorPosition(getch):
-    print("\x1b[6n", end="", flush=True)
-    buf = ""
-    while(True):
-        c = getch().decode()
-        buf += c
-        if c == "R":
-            break
-    try:
-        matches = re.match(r"^\x1b\[(\d*);(\d*)R", buf)
-        groups = matches.groups()
-    except AttributeError:
-        return 1, 1
-    return int(groups[0]), int(groups[1])
-
-
 def prompt(getch, message, lines=1):
     GV.blockPrint = True
-    _, col = getCursorPosition(getch)
+    _, col = PC.getCursorPosition(getch)
     PC.print("\r\n" + message, color=PrintClass.YELLOW, buffer=False)
     c = getch()
     for _ in range(lines):
@@ -220,7 +219,7 @@ def listenForKeys():
     getch = _Getch()
     while True:
         c = getch()
-        if GV.webSocket:
+        if GV.webSocket and not GV.firstMessage:
             if c == b'\x1d':
                 c = prompt(
                     getch, "Press n for NMI | s for SysRq | r to Reset VM |\r\nq to quit Console | CTRL + ] to forward input |", lines=2)
@@ -253,11 +252,28 @@ def listenForKeys():
             if c == b'\r':
                 GV.serialConsoleInstance.connect()
             elif c == b'\x1d':
-                c = getch()
+                c = prompt(getch, "Press q to quit Console")
                 if c == b'q':
                     quitapp()
                     return
 
+def loadingMessage(clearScreen = True):
+    if clearScreen:
+        PC.clearScreen()
+    PC.print("For more information on the Azure Serial Console, see <https://aka.ms/serialconsolelinux>.\r\n",
+                color=PrintClass.YELLOW)
+    indx = 0
+    numberOfSquares = 3
+    chars = ["\u25A1"] * numberOfSquares
+    while GV.loading:
+        charsCopy = chars.copy()
+        charsCopy[indx] = "\u25A0"
+        squares = " ".join(charsCopy)
+        PC.clearLine()
+        PC.print("Connecting to console of VM   " +
+                    squares, color=PrintClass.CYAN)
+        indx = (indx + 1) % numberOfSquares
+        time.sleep(0.5)
 
 class SerialConsole:
     def __init__(self, cmd, resource_group_name, vm_vmss_name, vmss_instanceid):
@@ -318,28 +334,12 @@ class SerialConsole:
                                                       on_message=on_message,
                                                       on_error=on_error,
                                                       on_close=on_close)
-                GV.webSocket.run_forever()
+                GV.webSocket.run_forever(skip_utf8_validation=True)
             else:
                 GV.loading = False
                 PC.print(
                     "\r\nCould not establish connection to VM or VMSS. Make sure that input parameters are correct or press Enter to try again...", color=PrintClass.RED)
 
-        def loadingMessage():
-            PC.clearScreen()
-            PC.print("For more information on the Azure Serial Console, see <https://aka.ms/serialconsolelinux>.\r\n",
-                     color=PrintClass.YELLOW)
-            indx = 0
-            numberOfSquares = 3
-            chars = ["\u25A1"] * numberOfSquares
-            while GV.loading:
-                charsCopy = chars.copy()
-                charsCopy[indx] = "\u25A0"
-                squares = " ".join(charsCopy)
-                PC.clearLine()
-                PC.print("Connecting to console of VM   " +
-                         squares, color=PrintClass.CYAN)
-                indx = (indx + 1) % numberOfSquares
-                time.sleep(0.5)
         GV.loading = True
         GV.firstMessage = True
 
@@ -362,16 +362,66 @@ class SerialConsole:
             data = {'command': command,
                     'requestId': str(uuid.uuid4()),
                     'commandParameters': commandParameters}
-            requests.post(url, headers=headers, data=json.dumps(data))
+            result = requests.post(url, headers=headers, data=json.dumps(data))
+            return result.status_code == 200
 
     def sendNMI(self):
-        self.sendAdminCommand("nmi", {})
+        return self.sendAdminCommand("nmi", {})
 
     def sendReset(self):
-        self.sendAdminCommand("reset", {})
+        return self.sendAdminCommand("reset", {})
 
     def sendSysRq(self, key):
-        self.sendAdminCommand("sysrq", {"SysRqCommand": key})
+        return self.sendAdminCommand("sysrq", {"SysRqCommand": key})
+
+    def connectAndSendAdminCommand(self, command, arg_character = None):
+        if command == "nmi":
+            func = self.sendNMI
+            successMessage = "NMI sent successfully\r\n"
+            failureMessage = "Failed to send NMI\r\n"
+        elif command == "reset":
+            func = self.sendReset
+            successMessage = "Successfully Hard Reset VM\r\n"
+            failureMessage = "Failed to Hard Reset VM\r\n"
+        elif command == "sysrq" and arg_character is not None and len(arg_character) == 1:
+            def wrapper():
+                return self.sendSysRq(arg_character)
+            func = wrapper
+            successMessage = "Successfully sent SysRq command\r\n"
+            failureMessage = "Failed to send SysRq command\r\n"
+        else:
+            return
+
+        GV.terminalInstance = Terminal()
+        GV.terminalInstance.configureTerminal()
+        GV.loading = True
+
+        th1 = threading.Thread(target=loadingMessage, args=(False,))
+        th1.daemon = True
+        th1.start()
+
+        if self.loadWebSocketURL():
+            def on_message(ws,_):
+                GV.trycount += 1
+                if func():
+                    GV.loading = False
+                    PC.clearLine()
+                    PC.print(successMessage)
+                    ws.close()
+                    return
+                if GV.trycount >= 2:
+                    GV.loading = False
+                    PC.clearLine()
+                    PC.print(failureMessage, color=PrintClass.RED)
+                    ws.close()
+
+            wsapp = websocket.WebSocketApp(self.websocketURL + "?authorization=" + self.accessToken, on_message=on_message)
+            wsapp.run_forever()
+        else:
+            PC.print("Could not establish connection to VM or VMSS. Make sure that input parameters are correct and try again.\r\n", color=PrintClass.RED)
+
+        GV.loading = False
+        GV.terminalInstance.revertTerminal()
 
 
 def connect_serialconsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid=None):
@@ -387,3 +437,15 @@ def connect_serialconsole(cmd, resource_group_name, vm_vmss_name, vmss_instancei
     GV.serialConsoleInstance.connect()
 
     th.join()
+
+def send_nmi_serialconsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid=None):
+    GV.serialConsoleInstance = SerialConsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
+    GV.serialConsoleInstance.connectAndSendAdminCommand("nmi")
+
+def send_reset_serialconsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid=None):
+    GV.serialConsoleInstance = SerialConsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
+    GV.serialConsoleInstance.connectAndSendAdminCommand("reset")
+
+def send_sysrq_serialconsole(cmd, resource_group_name, vm_vmss_name, sysrqinput, vmss_instanceid=None):
+    GV.serialConsoleInstance = SerialConsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
+    GV.serialConsoleInstance.connectAndSendAdminCommand("sysrq", arg_character=sysrqinput)

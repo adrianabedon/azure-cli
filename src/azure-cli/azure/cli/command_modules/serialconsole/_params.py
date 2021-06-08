@@ -8,7 +8,8 @@ from knack.arguments import CLIArgumentType
 
 
 vm_name_arg_type = CLIArgumentType(options_list=('--name', '-n'), metavar='VMNAME', help='Name of the VM or VMSS')
-vmss_instance_arg_type = CLIArgumentType(options_list=('--vmss-instance'), metavar='VMNSSAME', help='ID of VMSS instance. Not needed when connecting to the serial port of a VM')
+vmss_instance_arg_type = CLIArgumentType(options_list=('--vmss-instance'), metavar='VMSSNAME', help='ID of VMSS instance. Not needed when connecting to the serial port of a VM')
+sysrq_input_arg_type = CLIArgumentType(options_list=('--input'), metavar='SYSRQINPUT', help='SysRq Input Key')
 
 def load_arguments(self, _):
 
@@ -25,6 +26,5 @@ def load_arguments(self, _):
         # c.argument('location', validator=get_default_location_from_resource_group)
         # c.argument('serialconsole_name', serialconsole_name_type, options_list=['--name', '-n'])
 
-    # with self.argument_context('serialconsole list') as c:
-    #     # c.argument('serialconsole_name', serialconsole_name_type, id_part=None)
-    #     pass
+    with self.argument_context('serialconsole send-sysrq') as c:
+        c.argument('sysrqinput', arg_type=sysrq_input_arg_type)

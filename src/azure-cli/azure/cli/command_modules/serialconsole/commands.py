@@ -18,6 +18,9 @@ def load_command_table(self, _):
 
     with self.command_group('serialconsole') as g:
         g.custom_command('connect', 'connect_serialconsole')
+        g.custom_command('send-nmi', 'send_nmi_serialconsole')
+        g.custom_command('reset-vm', 'send_reset_serialconsole')
+        g.custom_command('send-sysrq', 'send_sysrq_serialconsole')
         # g.custom_command('list', 'list_serialconsole')
         # g.show_command('show', 'get')
         # g.generic_update_command('update', setter_name='update', custom_func_name='update_serialconsole')
