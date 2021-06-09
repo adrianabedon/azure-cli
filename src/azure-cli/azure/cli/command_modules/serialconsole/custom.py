@@ -4,6 +4,7 @@
 # --------------------------------------------------------------------------------------------
 
 # from knack.util import CLIError
+from requests.api import get
 import numpy
 import wsaccel
 import requests
@@ -14,6 +15,7 @@ import sys
 import uuid
 import time
 import re
+import textwrap
 
 
 class GlobalVariables:
@@ -61,6 +63,7 @@ class PrintClass:
     def emptyMessageBuffer(self):
         print(self.messageBuffer, end="", flush=True)
         self.messageBuffer = ""
+
     def getCursorPosition(self,getch):
         self.print("\x1b[6n", buffer=False)
         buf = ""
@@ -75,6 +78,21 @@ class PrintClass:
         except AttributeError:
             return 1, 1
         return int(groups[0]), int(groups[1])
+
+    def getTerminalWidth(self, getch):
+        PC.hideCursor(buffer=False)
+        _,originalCol = self.getCursorPosition(getch)
+        self.setCursorHorizontalPosition(999, buffer=False)
+        _,width = self.getCursorPosition(getch)
+        self.setCursorHorizontalPosition(originalCol, buffer=False)
+        PC.showCursor(buffer=False)
+        return width
+    
+    def hideCursor(self, buffer=True):
+        self.print("\x1b[?25l", buffer=buffer)
+    
+    def showCursor(self, buffer=True):
+        self.print("\x1b[?25h", buffer=buffer)
 
 GV = GlobalVariables()
 PC = PrintClass(GV)
@@ -201,15 +219,38 @@ class Terminal:
                 termios.tcsetattr(fd, termios.TCSADRAIN, self.unixOriginalMode)
 
 
+def getMaxWidthOfString(s):
+    maxWidth = -1
+    currWidth = 0
+    i = 0
+    while i < len(s):
+        if s[i] == '\r' or s[i] == '\n':
+            i += 2
+            maxWidth = max(currWidth, maxWidth)
+            currWidth = 0
+        else:
+            i += 1
+            currWidth += 1
+    return max(maxWidth, currWidth)
+
+
 def prompt(getch, message, lines=1):
     GV.blockPrint = True
+    width = PC.getTerminalWidth(getch)
     _, col = PC.getCursorPosition(getch)
+    #adjust string if it is too wide to fit in console
+    if width < getMaxWidthOfString(message):
+        wrapped = textwrap.wrap(message.replace("\r\n", " ").replace("\n\r", " "), width=width)
+        message = "\r\n".join(wrapped)
+        lines = len(wrapped)
     PC.print("\r\n" + message, color=PrintClass.YELLOW, buffer=False)
     c = getch()
+    PC.hideCursor(buffer=False)
     for _ in range(lines):
         PC.clearLine(buffer=False)
         PC.cursorUp(buffer=False)
     PC.setCursorHorizontalPosition(col, buffer=False)
+    PC.showCursor(buffer=False)
     PC.emptyMessageBuffer()
     GV.blockPrint = False
     return c
@@ -222,7 +263,7 @@ def listenForKeys():
         if GV.webSocket and not GV.firstMessage:
             if c == b'\x1d':
                 c = prompt(
-                    getch, "Press n for NMI | s for SysRq | r to Reset VM |\r\nq to quit Console | CTRL + ] to forward input |", lines=2)
+                    getch, "| Press n for NMI | s for SysRq | r to Reset VM |\r\n| q to quit Console | CTRL + ] to forward input |", lines=2)
                 if c == b'n':
                     c = prompt(getch, "Warning: A Non-Maskable Interrupt (NMI) is used in debugging\r\nscenarios and is designed to crash your target Virtual Machine.\r\nAre you sure you want to send an NMI? (Y/n): ", lines=3)
                     if c == b"Y":
@@ -266,12 +307,14 @@ def loadingMessage(clearScreen = True):
     numberOfSquares = 3
     chars = ["\u25A1"] * numberOfSquares
     while GV.loading:
+        PC.hideCursor()
         charsCopy = chars.copy()
         charsCopy[indx] = "\u25A0"
         squares = " ".join(charsCopy)
         PC.clearLine()
         PC.print("Connecting to console of VM   " +
                     squares, color=PrintClass.CYAN)
+        PC.showCursor()
         indx = (indx + 1) % numberOfSquares
         time.sleep(0.5)
 
@@ -323,8 +366,11 @@ class SerialConsole:
         def on_close(_):
             GV.loading = False
             if not GV.terminatingApp:
-                PC.print(
-                    "\r\nConnection Closed: Press Enter to reconnect...", color=PrintClass.RED)
+                if GV.firstMessage:
+                    PC.print("\r\nCould not establish connection to VM or VMSS. Make sure that it is powered on and press \"Enter\" try again...", color=PrintClass.RED)
+                else:
+                    PC.print(
+                        "\r\nConnection Closed: Press Enter to reconnect...", color=PrintClass.RED)
                 GV.webSocket = None
 
         def connectThread():
@@ -338,7 +384,7 @@ class SerialConsole:
             else:
                 GV.loading = False
                 PC.print(
-                    "\r\nCould not establish connection to VM or VMSS. Make sure that input parameters are correct or press Enter to try again...", color=PrintClass.RED)
+                    "\r\nCould not establish connection to VM or VMSS. Make sure that input parameters are correct or press \"Enter\" to try again...", color=PrintClass.RED)
 
         GV.loading = True
         GV.firstMessage = True
@@ -405,20 +451,27 @@ class SerialConsole:
                 GV.trycount += 1
                 if func():
                     GV.loading = False
+                    GV.terminatingApp = True
                     PC.clearLine()
                     PC.print(successMessage)
                     ws.close()
                     return
                 if GV.trycount >= 2:
                     GV.loading = False
+                    GV.terminatingApp = True
                     PC.clearLine()
                     PC.print(failureMessage, color=PrintClass.RED)
                     ws.close()
+            def on_close(_):
+                if not GV.terminatingApp:
+                    PC.clearLine()
+                    PC.print("Could not establish connection to VM or VMSS. Make sure that it is powered on and try again.\r\n", color=PrintClass.RED)
 
-            wsapp = websocket.WebSocketApp(self.websocketURL + "?authorization=" + self.accessToken, on_message=on_message)
+            wsapp = websocket.WebSocketApp(self.websocketURL + "?authorization=" + self.accessToken, on_message=on_message, on_close=on_close)
             wsapp.run_forever()
         else:
-            PC.print("Could not establish connection to VM or VMSS. Make sure that input parameters are correct and try again.\r\n", color=PrintClass.RED)
+            GV.loading = False
+            PC.print("\r\nCould not establish connection to VM or VMSS. Make sure that input parameters are correct and try again.\r\n", color=PrintClass.RED)
 
         GV.loading = False
         GV.terminalInstance.revertTerminal()
