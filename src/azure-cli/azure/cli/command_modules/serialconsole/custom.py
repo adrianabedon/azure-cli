@@ -29,6 +29,7 @@ class GlobalVariables:
         self.blockPrint = False
         self.trycount = 0
 
+
 class PrintClass:
     CYAN = 36
     YELLOW = 33
@@ -64,7 +65,7 @@ class PrintClass:
         print(self.messageBuffer, end="", flush=True)
         self.messageBuffer = ""
 
-    def getCursorPosition(self,getch):
+    def getCursorPosition(self, getch):
         self.print("\x1b[6n", buffer=False)
         buf = ""
         while True:
@@ -81,18 +82,19 @@ class PrintClass:
 
     def getTerminalWidth(self, getch):
         PC.hideCursor(buffer=False)
-        _,originalCol = self.getCursorPosition(getch)
+        _, originalCol = self.getCursorPosition(getch)
         self.setCursorHorizontalPosition(999, buffer=False)
-        _,width = self.getCursorPosition(getch)
+        _, width = self.getCursorPosition(getch)
         self.setCursorHorizontalPosition(originalCol, buffer=False)
         PC.showCursor(buffer=False)
         return width
-    
+
     def hideCursor(self, buffer=True):
         self.print("\x1b[?25l", buffer=buffer)
-    
+
     def showCursor(self, buffer=True):
         self.print("\x1b[?25h", buffer=buffer)
+
 
 GV = GlobalVariables()
 PC = PrintClass(GV)
@@ -238,9 +240,10 @@ def prompt(getch, message, lines=1):
     GV.blockPrint = True
     width = PC.getTerminalWidth(getch)
     _, col = PC.getCursorPosition(getch)
-    #adjust string if it is too wide to fit in console
+    # adjust string if it is too wide to fit in console
     if width < getMaxWidthOfString(message):
-        wrapped = textwrap.wrap(message.replace("\r\n", " ").replace("\n\r", " "), width=width)
+        wrapped = textwrap.wrap(message.replace(
+            "\r\n", " ").replace("\n\r", " "), width=width)
         message = "\r\n".join(wrapped)
         lines = len(wrapped)
     PC.print("\r\n" + message, color=PrintClass.YELLOW, buffer=False)
@@ -293,16 +296,17 @@ def listenForKeys():
             if c == b'\r':
                 GV.serialConsoleInstance.connect()
             elif c == b'\x1d':
-                c = prompt(getch, "Press q to quit Console")
+                c = prompt(getch, "| Press q to quit Console |")
                 if c == b'q':
                     quitapp()
                     return
 
-def loadingMessage(clearScreen = True):
+
+def loadingMessage(clearScreen=True):
     if clearScreen:
         PC.clearScreen()
     PC.print("For more information on the Azure Serial Console, see <https://aka.ms/serialconsolelinux>.\r\n",
-                color=PrintClass.YELLOW)
+             color=PrintClass.YELLOW)
     indx = 0
     numberOfSquares = 3
     chars = ["\u25A1"] * numberOfSquares
@@ -313,10 +317,11 @@ def loadingMessage(clearScreen = True):
         squares = " ".join(charsCopy)
         PC.clearLine()
         PC.print("Connecting to console of VM   " +
-                    squares, color=PrintClass.CYAN)
+                 squares, color=PrintClass.CYAN)
         PC.showCursor()
         indx = (indx + 1) % numberOfSquares
         time.sleep(0.5)
+
 
 class SerialConsole:
     def __init__(self, cmd, resource_group_name, vm_vmss_name, vmss_instanceid):
@@ -367,7 +372,8 @@ class SerialConsole:
             GV.loading = False
             if not GV.terminatingApp:
                 if GV.firstMessage:
-                    PC.print("\r\nCould not establish connection to VM or VMSS. Make sure that it is powered on and press \"Enter\" try again...", color=PrintClass.RED)
+                    PC.print(
+                        "\r\nCould not establish connection to VM or VMSS. Make sure that it is powered on and press \"Enter\" try again...", color=PrintClass.RED)
                 else:
                     PC.print(
                         "\r\nConnection Closed: Press Enter to reconnect...", color=PrintClass.RED)
@@ -397,6 +403,15 @@ class SerialConsole:
         th2.daemon = True
         th2.start()
 
+    def launchConsole(self):
+        GV.terminalInstance = Terminal()
+        GV.terminalInstance.configureTerminal()
+        th = threading.Thread(target=listenForKeys, args=())
+        th.daemon = True
+        th.start()
+        self.connect()
+        th.join()
+
     def sendAdminCommand(self, command, commandParameters):
         if self.websocketURL and self.accessToken:
             url = self.websocketURL.replace("wss", "https").replace(
@@ -420,7 +435,7 @@ class SerialConsole:
     def sendSysRq(self, key):
         return self.sendAdminCommand("sysrq", {"SysRqCommand": key})
 
-    def connectAndSendAdminCommand(self, command, arg_character = None):
+    def connectAndSendAdminCommand(self, command, arg_character=None):
         if command == "nmi":
             func = self.sendNMI
             successMessage = "NMI sent successfully\r\n"
@@ -447,7 +462,7 @@ class SerialConsole:
         th1.start()
 
         if self.loadWebSocketURL():
-            def on_message(ws,_):
+            def on_message(ws, _):
                 GV.trycount += 1
                 if func():
                     GV.loading = False
@@ -462,12 +477,15 @@ class SerialConsole:
                     PC.clearLine()
                     PC.print(failureMessage, color=PrintClass.RED)
                     ws.close()
+
             def on_close(_):
                 if not GV.terminatingApp:
                     PC.clearLine()
-                    PC.print("Could not establish connection to VM or VMSS. Make sure that it is powered on and try again.\r\n", color=PrintClass.RED)
+                    PC.print(
+                        "Could not establish connection to VM or VMSS. Make sure that it is powered on and try again.\r\n", color=PrintClass.RED)
 
-            wsapp = websocket.WebSocketApp(self.websocketURL + "?authorization=" + self.accessToken, on_message=on_message, on_close=on_close)
+            wsapp = websocket.WebSocketApp(
+                self.websocketURL + "?authorization=" + self.accessToken, on_message=on_message, on_close=on_close)
             wsapp.run_forever()
         else:
             GV.loading = False
@@ -478,27 +496,25 @@ class SerialConsole:
 
 
 def connect_serialconsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid=None):
-    GV.terminalInstance = Terminal()
-    GV.terminalInstance.configureTerminal()
-
-    th = threading.Thread(target=listenForKeys, args=())
-    th.daemon = True
-    th.start()
-
     GV.serialConsoleInstance = SerialConsole(
         cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
-    GV.serialConsoleInstance.connect()
+    GV.serialConsoleInstance.launchConsole()
 
-    th.join()
 
 def send_nmi_serialconsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid=None):
-    GV.serialConsoleInstance = SerialConsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
+    GV.serialConsoleInstance = SerialConsole(
+        cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
     GV.serialConsoleInstance.connectAndSendAdminCommand("nmi")
 
+
 def send_reset_serialconsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid=None):
-    GV.serialConsoleInstance = SerialConsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
+    GV.serialConsoleInstance = SerialConsole(
+        cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
     GV.serialConsoleInstance.connectAndSendAdminCommand("reset")
 
+
 def send_sysrq_serialconsole(cmd, resource_group_name, vm_vmss_name, sysrqinput, vmss_instanceid=None):
-    GV.serialConsoleInstance = SerialConsole(cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
-    GV.serialConsoleInstance.connectAndSendAdminCommand("sysrq", arg_character=sysrqinput)
+    GV.serialConsoleInstance = SerialConsole(
+        cmd, resource_group_name, vm_vmss_name, vmss_instanceid)
+    GV.serialConsoleInstance.connectAndSendAdminCommand(
+        "sysrq", arg_character=sysrqinput)
